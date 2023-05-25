@@ -227,8 +227,8 @@ class PassimpayMerchantAPI
             curl_setopt($curl, CURLOPT_POST, true);
             curl_setopt($curl, CURLOPT_ENCODING, 'gzip');
             curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true);
-            curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-            curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
+            //curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
+            //curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, false);
             $out = curl_exec($curl);
             $this->_response = $out;
 
