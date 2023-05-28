@@ -86,7 +86,7 @@ class PassimpayValidationModuleFrontController extends ModuleFrontController
         return $request->paymentUrl;
     }
 
-    function logs($requestData, $request, $file)
+    public function logs($requestData, $request, $file)
     {
         // log send
         $log = '[' . date('D M d H:i:s Y', time()) . '] ';
@@ -114,7 +114,7 @@ class PassimpayValidationModuleFrontController extends ModuleFrontController
         }
     }
 
-    function getRoundedCartAmount($products, $shippingPrice)
+    public function getRoundedCartAmount($products, $shippingPrice)
     {
         $roundedAmount = round($shippingPrice, 2);
 
