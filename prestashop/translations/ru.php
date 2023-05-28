@@ -19,6 +19,5 @@ $_MODULE['<{passimpay}prestashop>passimpay_229a7ec501323b94db7ff3157a7623c9'] = 
 $_MODULE['<{passimpay}prestashop>passimpay_952bf87c967660b7bbd4e1eb08cefc92'] = 'Секретный ключ';
 $_MODULE['<{passimpay}prestashop>passimpay_428bfc853e841c0df085fdbf545a9921'] = 'Тестовый режим';
 $_MODULE['<{passimpay}prestashop>passimpay_b17f3f4dcf653a5776792498a9b44d6a'] = 'Обновить настройки';
-$_MODULE['<{passimpay}prestashop>passimpay_f0882e45de96aeffc564e1db9c10db6e'] = 'Оплатить через Passimpay';
 
 
