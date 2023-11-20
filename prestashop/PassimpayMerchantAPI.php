@@ -53,7 +53,7 @@ class PassimpayMerchantAPI
      */
     public function __construct($platformId, $secretKey)
     {
-        $this->_api_url = 'https://passimpay.io/api';
+        $this->_api_url = 'https://api.passimpay.io';
         $this->_platformId = $platformId;
         $this->_secretKey = $secretKey;
     }
