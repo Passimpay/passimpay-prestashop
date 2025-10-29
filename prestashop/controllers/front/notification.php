@@ -1,58 +1,189 @@
 <?php
 
-set_error_handler('exceptions_error_handler', E_ALL);
-function exceptions_error_handler($severity)
-{
-//    if (error_reporting() == 0) {
-//        return;
-//    }
-//    if (error_reporting() & $severity) {
-//        die('NOTOK');
-//    }
-}
+use Passimpay\PassimpayMerchantAPI;
 
 class PassimpayNotificationModuleFrontController extends ModuleFrontController
 {
-    /**
-     * @see FrontController::postProcess()
-     */
+    const LOG_PREFIX = 'Passimpay: Order #';
+    const WEBHOOK_PREFIX = 'Passimpay webhook: ';
+    
+    public function init()
+    {
+        parent::init();
+    }
+
     public function postProcess()
     {
         $params = $_POST;
 
-        Tools::safePostVars();
-        $order = Passimpay::getOrderById($params['order_id']);
-
-        if (!$order) {
+        if (!$this->validateRequest($params)) {
             die('NOTOK');
         }
 
-        $config = Configuration::getMultiple(array('PP_PLATFORM_ID', 'PP_SECRET_KEY', 'PP_LANGUAGE'));
-        $methodInstance = new PassimpayMerchantAPI($config['PP_PLATFORM_ID'], $config['PP_SECRET_KEY']);
+        $orderId = (int)$params['order_id'];
+        $order = new Order($orderId);
 
+        if (!Validate::isLoadedObject($order)) {
+            PrestaShopLogger::addLog(self::WEBHOOK_PREFIX . 'Order #' . $orderId . ' not found', 2);
+            die('NOTOK');
+        }
+
+        $api = $this->initializeAPI();
+        if (!$api) {
+            die('NOTOK');
+        }
+
+        if (!$this->verifyHash($api, $params, $orderId)) {
+            die('NOTOK');
+        }
+
+        $this->logTransactionIfPresent($params, $order);
+
+        $paymentStatus = $api->getOrderStatus($orderId);
+        $this->handlePaymentStatus($paymentStatus, $order, $orderId);
+    }
+
+    private function validateRequest($params)
+    {
+        if (empty($params)) {
+            PrestaShopLogger::addLog(self::WEBHOOK_PREFIX . 'Empty POST data', 2);
+            return false;
+        }
+
+        $requiredFields = ['order_id', 'platform_id', 'hash'];
+        foreach ($requiredFields as $field) {
+            if (!isset($params[$field]) || $params[$field] === '') {
+                PrestaShopLogger::addLog(self::WEBHOOK_PREFIX . 'Missing field ' . $field, 2);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function initializeAPI()
+    {
+        $config = Configuration::getMultiple(['PP_PLATFORM_ID', 'PP_SECRET_KEY']);
+        
+        if (empty($config['PP_PLATFORM_ID']) || empty($config['PP_SECRET_KEY'])) {
+            PrestaShopLogger::addLog(self::WEBHOOK_PREFIX . 'Module not configured', 3);
+            return null;
+        }
+
+        return new PassimpayMerchantAPI($config['PP_PLATFORM_ID'], $config['PP_SECRET_KEY']);
+    }
+
+    private function verifyHash($api, $params, $orderId)
+    {
         $data = [
-            'platform_id' => (int) $_POST['platform_id'], // Platform ID
-            'payment_id' => (int) $_POST['payment_id'], // currency ID
-            'order_id' => (int) $_POST['order_id'], // Payment ID of your platform
-            'amount' => $_POST['amount'], // transaction amount
-            'txhash' => $_POST['txhash'], // Hash or transaction ID. You can find the transaction ID in the PassimPay transaction history in your account.
-            'address_from' => $_POST['address_from'], // sender address
-            'address_to' => $_POST['address_to'], // recipient address
-            'fee' => $_POST['fee'], // network fee
+            'platform_id'   => (int) $params['platform_id'],
+            'payment_id'    => isset($params['payment_id']) ? (int) $params['payment_id'] : 0,
+            'order_id'      => (int) $params['order_id'],
+            'amount'        => isset($params['amount']) ? $params['amount'] : '0',
+            'txhash'        => isset($params['txhash']) ? $params['txhash'] : '',
+            'address_from'  => isset($params['address_from']) ? $params['address_from'] : '',
+            'address_to'    => isset($params['address_to']) ? $params['address_to'] : '',
+            'fee'           => isset($params['fee']) ? $params['fee'] : '0',
         ];
-
-        if (!$methodInstance->checkHash($data, $params['hash'])) {
-//            file_put_contents('tmp.log', $params['order_id'] . ' : Hash is invalid' . PHP_EOL, FILE_APPEND);
-            die('NOT OK');
+        
+        if (isset($params['confirmations'])) {
+            $data['confirmations'] = (int) $params['confirmations'];
         }
 
-        if (!$methodInstance->orderStatusIsCompleted($params['order_id'])) {
-//            file_put_contents('tmp.log', $params['order_id'] . ' : Payment process has wrong status' . PHP_EOL, FILE_APPEND);
-            die('Payment process has wrong status');
+        if (!$api->checkHash($data, $params['hash'])) {
+            PrestaShopLogger::addLog(self::WEBHOOK_PREFIX . 'Invalid hash for order #' . $orderId, 3);
+            return false;
         }
 
-        $order->setCurrentState(_PS_OS_PAYMENT_);
+        return true;
+    }
 
+    private function logTransactionIfPresent($params, $order)
+    {
+        if (empty($params['txhash'])) {
+            return;
+        }
+
+        $message = new Message();
+        $message->message = sprintf(
+            'Passimpay transaction: %s, TxHash: %s',
+            isset($params['amount']) ? $params['amount'] : 'N/A',
+            $params['txhash']
+        );
+        $message->id_order = (int)$order->id;
+        $message->private = 1;
+        $message->add();
+    }
+
+    private function handlePaymentStatus($paymentStatus, $order, $orderId)
+    {
+        switch ($paymentStatus) {
+            case PassimpayMerchantAPI::PAYMENT_STATUS_COMPLETED:
+                $this->handleCompletedPayment($order, $orderId);
+                break;
+
+            case PassimpayMerchantAPI::PAYMENT_STATUS_PROCESSING:
+                $this->handleProcessingPayment($order, $orderId);
+                break;
+
+            case PassimpayMerchantAPI::PAYMENT_STATUS_ERROR:
+                $this->handleErrorPayment($order, $orderId);
+                break;
+
+            default:
+                $this->handleUnknownStatus($order, $orderId, $paymentStatus);
+        }
+    }
+
+    private function handleCompletedPayment($order, $orderId)
+    {
+        $paidStatusId = (int)Configuration::get('PS_OS_PAYMENT');
+        
+        if ($order->current_state == $paidStatusId) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . $orderId . ' already paid', 1);
+            die('OK');
+        }
+
+        $order->setCurrentState($paidStatusId);
+        $this->addOrderMessage($order, 'Payment completed');
+        
+        PrestaShopLogger::addLog(self::LOG_PREFIX . $orderId . ' marked as paid', 1);
         die('OK');
+    }
+
+    private function handleProcessingPayment($order, $orderId)
+    {
+        $this->addOrderMessage($order, 'Partial payment received');
+        PrestaShopLogger::addLog(self::LOG_PREFIX . $orderId . ' payment processing', 1);
+        die('PROCESSING');
+    }
+
+    private function handleErrorPayment($order, $orderId)
+    {
+        $errorStatusId = (int)Configuration::get('PS_OS_ERROR');
+        
+        if ($order->current_state != $errorStatusId) {
+            $order->setCurrentState($errorStatusId);
+            $this->addOrderMessage($order, 'Payment failed');
+        }
+        
+        PrestaShopLogger::addLog(self::LOG_PREFIX . $orderId . ' payment error', 2);
+        die('ERROR');
+    }
+
+    private function handleUnknownStatus($order, $orderId, $paymentStatus)
+    {
+        $this->addOrderMessage($order, 'Unable to verify payment status');
+        PrestaShopLogger::addLog(self::LOG_PREFIX . $orderId . ' unknown status: ' . $paymentStatus, 2);
+        die('API_ERROR');
+    }
+
+    private function addOrderMessage($order, $messageText)
+    {
+        $message = new Message();
+        $message->message = 'Passimpay: ' . $messageText;
+        $message->id_order = (int)$order->id;
+        $message->private = 1;
+        $message->add();
     }
 }

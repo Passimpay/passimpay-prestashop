@@ -1,127 +1,151 @@
 <?php
 
-/**
- * @since 1.5.0
- */
 class PassimpayValidationModuleFrontController extends ModuleFrontController
 {
-    static public $vats = [
-        'none' => 'none',
-        '0' => 'vat0',
-        '10' => 'vat10',
-        '18' => 'vat18',
-        '20' => 'vat20',
-    ];
+    const ORDER_STEP_URL = 'index.php?controller=order&step=1';
+    const LOG_PREFIX = 'Passimpay: ';
+    const LOG_ORDER_PREFIX = 'Passimpay: Order #';
 
-    /**
-     * @see FrontController::postProcess()
-     */
+    public function init()
+    {
+        parent::init();
+        
+        if (!class_exists('PassimpayMerchantAPI')) {
+            require_once dirname(__FILE__) . '/../../PassimpayMerchantAPI.php';
+        }
+    }
+
     public function postProcess()
     {
         $cart = $this->context->cart;
+        
+        if (!Validate::isLoadedObject($cart)) {
+            Tools::redirect(self::ORDER_STEP_URL);
+        }
+        
         $customer = new Customer($cart->id_customer);
-
-        if (!Validate::isLoadedObject($customer))
-            Tools::redirect('index.php?controller=order&step=1');
-
-        $mailVars = array(
-            '{bankwire_owner}' => Configuration::get('BANK_WIRE_OWNER'),
-            '{bankwire_details}' => nl2br(Configuration::get('BANK_WIRE_DETAILS')),
-            '{bankwire_address}' => nl2br(Configuration::get('BANK_WIRE_ADDRESS'))
-        );
-
-        $passimpay = new Passimpay();
-        $passimpay->validateOrder($cart->id, Configuration::get('PS_OS_BANKWIRE'),
-            (float)$cart->getOrderTotal(true, Cart::BOTH),
-            $this->module->displayName, NULL,
-            $mailVars, (int)$this->context->currency->id, false, $customer->secure_key);
-
-        $paymentUrl = $this->getPaymentUrl();
-        $order = Order::getIdByCartId($cart->id);
-
+        
+        if (!Validate::isLoadedObject($customer)) {
+            Tools::redirect(self::ORDER_STEP_URL);
+        }
+        
+        $passimpay = Module::getInstanceByName('passimpay');
+        
+        if (!$passimpay) {
+            Tools::redirect(self::ORDER_STEP_URL);
+        }
+        
+        try {
+            $result = $passimpay->validateOrder(
+                (int)$cart->id,
+                (int)Configuration::get('PS_OS_BANKWIRE'),
+                (float)$cart->getOrderTotal(true, Cart::BOTH),
+                $passimpay->displayName,
+                null,
+                [],
+                (int)$cart->id_currency,
+                false,
+                $customer->secure_key
+            );
+            
+            if (!$result) {
+                throw new Exception('validateOrder failed');
+            }
+            
+        } catch (Exception $e) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . 'validateOrder error - ' . $e->getMessage(), 3);
+            Tools::redirect(self::ORDER_STEP_URL);
+        }
+        
+        $orderId = isset($passimpay->currentOrder) && $passimpay->currentOrder 
+            ? (int)$passimpay->currentOrder 
+            : Order::getByCartId((int)$cart->id);
+        
+        if (!$orderId) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . 'Order creation failed for cart ' . $cart->id, 3);
+            Tools::redirect(self::ORDER_STEP_URL);
+        }
+        
+        PrestaShopLogger::addLog(self::LOG_ORDER_PREFIX . $orderId . ' created', 1);
+        
+        $paymentUrl = $this->getPaymentUrl($orderId);
+        
         if ($paymentUrl) {
             Tools::redirect($paymentUrl);
         } else {
-            Tools::redirect('index.php?controller=order-detail&id_order=' . $order);
+            Tools::redirect('index.php?controller=order-confirmation&id_cart=' . $cart->id . '&id_module=' . $passimpay->id . '&id_order=' . $orderId . '&key=' . $customer->secure_key);
         }
     }
 
-    public function getPaymentUrl()
+    private function getPaymentUrl($orderId)
     {
-        $cookie = $this->context->cookie;
-        $cart = $this->context->cart;
-        $config = Configuration::getMultiple(array('PP_PLATFORM_ID', 'PP_SECRET_KEY', 'PP_LANGUAGE'));
-
-        $price = $cart->getOrderTotal(true, 3);
-        $currentCurrencyId = $this->context->currency->id;
-        $defaultCurrencyId = Currency::getDefaultCurrency()->id;
-        $usdCurrencyId = Currency::getIdByIsoCode('USD');
-        if ($currentCurrencyId !== $usdCurrencyId) {
-            if ($currentCurrencyId !== $defaultCurrencyId) {
-                $price = Tools::convertPrice($price, $currentCurrencyId, false);
+        $result = false;
+        
+        try {
+            $config = $this->getModuleConfig();
+            $order = $this->loadOrder($orderId);
+            
+            if ($config && $order) {
+                $result = $this->requestPaymentUrl($order, $config);
             }
-            $price = Tools::convertPrice($price, $usdCurrencyId, true);
+            
+        } catch (Exception $e) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . 'exception: ' . $e->getMessage(), 3);
         }
-        $requestData = array(
-            'order_id'  => (int) Order::getIdByCartId($cart->id),
-            'amount'    => number_format($price, 2, '.', ''),
-        );
-//        var_dump($requestData, $usdCurrencyId); die();
-
-        if ($config['PP_LANGUAGE'] == 'en') {
-            $requestData['Language'] = 'en';
-        }
-
-        global $smarty;
-        $smarty->caching = false;
-        $smarty->force_compile = true;
-        $smarty->compile_check = false;
-
-        $Passimpay = new PassimpayMerchantAPI($config['PP_PLATFORM_ID'], $config['PP_SECRET_KEY']);
-        $request = $Passimpay->init($requestData);
-
-//        var_dump($request, $requestData); die();
-//        $request = json_decode($request);
-
-        return $request->paymentUrl;
+        
+        return $result;
     }
 
-    public function logs($requestData, $request, $file)
+    private function getModuleConfig()
     {
-        // log send
-        $log = '[' . date('D M d H:i:s Y', time()) . '] ';
-        $log .= json_encode($requestData, JSON_UNESCAPED_UNICODE);
-        $log .= "\n";
-        file_put_contents(dirname(__FILE__) . $file, $log, FILE_APPEND);
-
-        $log = '[' . date('D M d H:i:s Y', time()) . '] ';
-        $log .= $request;
-        $log .= "\n";
-        file_put_contents(dirname(__FILE__) . $file, $log, FILE_APPEND);
+        $config = Configuration::getMultiple(['PP_PLATFORM_ID', 'PP_SECRET_KEY']);
+        
+        if (empty($config['PP_PLATFORM_ID']) || empty($config['PP_SECRET_KEY'])) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . 'Module not configured', 3);
+            return null;
+        }
+        
+        return $config;
     }
 
-    /**
-     * @param $taxRule
-     * @param $taxRate
-     * @return mixed
-     */
-    static public function getVat($taxRule, $taxRate)
+    private function loadOrder($orderId)
     {
-        if ($taxRule) {
-            return self::$vats[$taxRate];
-        } else {
-            return self::$vats['none'];
+        $order = new Order($orderId);
+        
+        if (!Validate::isLoadedObject($order)) {
+            PrestaShopLogger::addLog(self::LOG_ORDER_PREFIX . $orderId . ' not found', 3);
+            return null;
         }
+        
+        return $order;
     }
 
-    public function getRoundedCartAmount($products, $shippingPrice)
+    private function requestPaymentUrl($order, $config)
     {
-        $roundedAmount = round($shippingPrice, 2);
-
-        foreach ($products as $product) {
-            $roundedAmount += round($product['price_wt'], 2) * $product['quantity'];
+        $totalAmount = (float)$order->total_paid;
+        $currency = new Currency($order->id_currency);
+        
+        $requestData = [
+            'order_id' => (string)$order->id,
+            'amount' => number_format($totalAmount, 2, '.', ''),
+            'symbol' => $currency->iso_code
+        ];
+        
+        $api = new PassimpayMerchantAPI($config['PP_PLATFORM_ID'], $config['PP_SECRET_KEY']);
+        $apiResult = $api->init($requestData);
+        
+        if ($apiResult->error) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . 'API error: ' . $apiResult->error, 3);
+            return false;
         }
-
-        return $roundedAmount;
+        
+        $paymentUrl = $apiResult->paymentUrl;
+        
+        if (empty($paymentUrl)) {
+            PrestaShopLogger::addLog(self::LOG_PREFIX . 'Empty payment URL', 3);
+            return false;
+        }
+        
+        return $paymentUrl;
     }
 }
