@@ -12,13 +12,20 @@ class Passimpay extends PaymentModule
 {
     const CONFIG_PLATFORM_ID = 'PP_PLATFORM_ID';
     const CONFIG_SECRET_KEY = 'PP_SECRET_KEY';
+    const CONFIG_PAYMENT_TYPE = 'PP_PAYMENT_TYPE';
     const LOG_PREFIX = 'Passimpay: ';
+
+    /** API type: 0 = card + crypto, 1 = crypto only, 2 = card only */
+    const PAYMENT_TYPE_BOTH = 0;
+    const PAYMENT_TYPE_CRYPTO = 1;
+    const PAYMENT_TYPE_CARD = 2;
     
     protected $_html = '';
     private $_postErrors = array();
     
     public $pp_platform_id;
     public $pp_secret_key;
+    public $pp_payment_type;
     public $pp_language;
     public $page;
 
@@ -46,12 +53,14 @@ class Passimpay extends PaymentModule
     {
         if (!parent::install() 
             || !$this->registerHook('paymentOptions')
-            || !$this->registerHook('displayAdminOrderSide')) {
+            || !$this->registerHook('displayAdminOrderSide')
+            || !$this->registerHook('displayHeader')) {
             return false;
         }
 
         Configuration::updateValue(self::CONFIG_PLATFORM_ID, '');
         Configuration::updateValue(self::CONFIG_SECRET_KEY, '');
+        Configuration::updateValue(self::CONFIG_PAYMENT_TYPE, self::PAYMENT_TYPE_BOTH);
 
         return true;
     }
@@ -60,6 +69,7 @@ class Passimpay extends PaymentModule
     {
         if (!Configuration::deleteByName(self::CONFIG_PLATFORM_ID)
             || !Configuration::deleteByName(self::CONFIG_SECRET_KEY)
+            || !Configuration::deleteByName(self::CONFIG_PAYMENT_TYPE)
             || !parent::uninstall()) {
             return false;
         }
@@ -69,15 +79,90 @@ class Passimpay extends PaymentModule
 
     public function setPaymentAttributes()
     {
-        $config = Configuration::getMultiple(array(self::CONFIG_PLATFORM_ID, self::CONFIG_SECRET_KEY));
+        $config = Configuration::getMultiple(array(
+            self::CONFIG_PLATFORM_ID,
+            self::CONFIG_SECRET_KEY,
+            self::CONFIG_PAYMENT_TYPE
+        ));
 
         if (isset($config[self::CONFIG_PLATFORM_ID])) {
             $this->pp_platform_id = $config[self::CONFIG_PLATFORM_ID];
         }
-        
         if (isset($config[self::CONFIG_SECRET_KEY])) {
             $this->pp_secret_key = $config[self::CONFIG_SECRET_KEY];
         }
+        if (isset($config[self::CONFIG_PAYMENT_TYPE])) {
+            $this->pp_payment_type = (int)$config[self::CONFIG_PAYMENT_TYPE];
+        } else {
+            $this->pp_payment_type = self::PAYMENT_TYPE_BOTH;
+        }
+    }
+
+    /**
+     * Call-to-action text and logo for checkout depending on payment type.
+     * @return array ['label' => string, 'logo' => string]
+     */
+    public function getPaymentTypeDisplay()
+    {
+        $type = (int)$this->pp_payment_type;
+        $baseUrl = $this->context->link->getBaseLink(true) . 'modules/' . $this->name . '/';
+        $imgDir = dirname(__FILE__) . '/views/img/';
+        $defaultLogo = $baseUrl . 'logo.svg';
+
+        $logos = array(
+            self::PAYMENT_TYPE_BOTH  => $defaultLogo,
+            self::PAYMENT_TYPE_CRYPTO => $baseUrl . 'views/img/logo_crypto.svg',
+            self::PAYMENT_TYPE_CARD  => $baseUrl . 'views/img/logo_card.svg',
+        );
+        $labels = array(
+            self::PAYMENT_TYPE_BOTH  => $this->l('Pay with card or crypto via Passimpay'),
+            self::PAYMENT_TYPE_CRYPTO => $this->l('Pay with cryptocurrency via Passimpay'),
+            self::PAYMENT_TYPE_CARD  => $this->l('Pay with bank card via Passimpay'),
+        );
+        if (!isset($logos[$type])) {
+            $type = self::PAYMENT_TYPE_BOTH;
+        }
+        $logo = $logos[$type];
+        if ($type === self::PAYMENT_TYPE_CRYPTO) {
+            if (!file_exists($imgDir . 'logo_crypto.svg') && !file_exists($imgDir . 'logo_crypto.png')) {
+                $logo = $defaultLogo;
+            } elseif (file_exists($imgDir . 'logo_crypto.png') && !file_exists($imgDir . 'logo_crypto.svg')) {
+                $logo = $baseUrl . 'views/img/logo_crypto.png';
+            }
+        } elseif ($type === self::PAYMENT_TYPE_CARD) {
+            if (!file_exists($imgDir . 'logo_card.svg') && !file_exists($imgDir . 'logo_card.png')) {
+                $logo = $defaultLogo;
+            } elseif (file_exists($imgDir . 'logo_card.png') && !file_exists($imgDir . 'logo_card.svg')) {
+                $logo = $baseUrl . 'views/img/logo_card.png';
+            }
+        }
+        return array(
+            'label' => $labels[$type],
+            'logo'  => $logo,
+            'type'  => $type,
+        );
+    }
+
+    public function hookDisplayHeader($params)
+    {
+        if (!$this->active) {
+            return '';
+        }
+        $controller = $this->context->controller;
+        $isOrder = ($controller && (isset($controller->controller_name) && $controller->controller_name === 'order'));
+        if (!$isOrder) {
+            return '';
+        }
+        return '<script>
+(function() {
+    document.addEventListener("DOMContentLoaded", function() {
+        var imgs = document.querySelectorAll("img[src*=\"passimpay\"]");
+        for (var i = 1; i < imgs.length; i++) {
+            imgs[i].style.display = "none";
+        }
+    });
+})();
+</script>';
     }
 
     public function hookPaymentOptions($params)
@@ -86,10 +171,14 @@ class Passimpay extends PaymentModule
             return array();
         }
 
+        $display = $this->getPaymentTypeDisplay();
+        $this->context->smarty->assign('passimpay_checkout', $display);
+
         $newOption = new PaymentOption();
-        $newOption->setCallToActionText($this->l('Pay with cryptocurrencies via Passimpay'))
+        $newOption->setCallToActionText($display['label'])
             ->setAction($this->context->link->getModuleLink($this->name, 'validation', array(), true))
-            ->setAdditionalInformation($this->context->smarty->fetch('module:passimpay/views/templates/front/payment_request.tpl'));
+            ->setAdditionalInformation($this->context->smarty->fetch('module:passimpay/views/templates/front/payment_request.tpl'))
+            ->setLogo($display['logo']);
 
         return array($newOption);
     }
@@ -211,7 +300,10 @@ class Passimpay extends PaymentModule
     {
         Configuration::updateValue(self::CONFIG_PLATFORM_ID, $_POST['pp_platform_id']);
         Configuration::updateValue(self::CONFIG_SECRET_KEY, $_POST['pp_secret_key']);
-
+        $type = isset($_POST['pp_payment_type']) ? (int)$_POST['pp_payment_type'] : self::PAYMENT_TYPE_BOTH;
+        if (in_array($type, array(self::PAYMENT_TYPE_BOTH, self::PAYMENT_TYPE_CRYPTO, self::PAYMENT_TYPE_CARD), true)) {
+            Configuration::updateValue(self::CONFIG_PAYMENT_TYPE, $type);
+        }
         $this->setPaymentAttributes();
     }
 
@@ -239,13 +331,24 @@ class Passimpay extends PaymentModule
 
         // Generate webhook URL for this merchant
         $webhookUrl = Tools::getShopDomainSsl(true) . __PS_BASE_URI__ . 'modules/passimpay/webhook.php';
+	$settingsLogoUrl = Tools::getShopDomainSsl(true) . __PS_BASE_URI__ . 'modules/passimpay/views/img/logo.svg';
 
+        $paymentTypeOptions = array(
+            self::PAYMENT_TYPE_BOTH  => $this->l('Card and cryptocurrency'),
+            self::PAYMENT_TYPE_CRYPTO => $this->l('Cryptocurrency only'),
+            self::PAYMENT_TYPE_CARD  => $this->l('Bank card only'),
+        );
+        $cardNotice = $this->l('Before enabling card payments, ensure that «Cards/Bank transfer» is turned on in your Passimpay platform settings.');
         $this->smarty->assign(
             array(
                 'action' => $_SERVER['REQUEST_URI'],
                 'platform_id' => $this->getSetting('pp_platform_id', $this->pp_platform_id),
                 'secret_key' => $this->getSetting('pp_secret_key', $this->pp_secret_key),
+                'payment_type' => $this->getSetting('pp_payment_type', $this->pp_payment_type),
+                'payment_type_options' => $paymentTypeOptions,
+                'passimpay_card_notice' => $cardNotice,
                 'webhook_url' => $webhookUrl,
+		'settings_logo_url' => $settingsLogoUrl,
                 'this' => $this,
             )
         );
