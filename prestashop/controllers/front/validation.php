@@ -98,13 +98,15 @@ class PassimpayValidationModuleFrontController extends ModuleFrontController
 
     private function getModuleConfig()
     {
-        $config = Configuration::getMultiple(['PP_PLATFORM_ID', 'PP_SECRET_KEY']);
+        $config = Configuration::getMultiple(['PP_PLATFORM_ID', 'PP_SECRET_KEY', 'PP_PAYMENT_TYPE']);
         
         if (empty($config['PP_PLATFORM_ID']) || empty($config['PP_SECRET_KEY'])) {
             PrestaShopLogger::addLog(self::LOG_PREFIX . 'Module not configured', 3);
             return null;
         }
-        
+        if (!isset($config['PP_PAYMENT_TYPE'])) {
+            $config['PP_PAYMENT_TYPE'] = 0;
+        }
         return $config;
     }
 
@@ -128,7 +130,8 @@ class PassimpayValidationModuleFrontController extends ModuleFrontController
         $requestData = [
             'order_id' => (string)$order->id,
             'amount' => number_format($totalAmount, 2, '.', ''),
-            'symbol' => $currency->iso_code
+            'symbol' => $currency->iso_code,
+            'type' => (int)$config['PP_PAYMENT_TYPE'],
         ];
         
         $api = new PassimpayMerchantAPI($config['PP_PLATFORM_ID'], $config['PP_SECRET_KEY']);
