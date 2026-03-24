@@ -2,7 +2,7 @@
 <module>
     <name>passimpay</name>
     <displayName><![CDATA[Passimpay]]></displayName>
-    <version><![CDATA[1]]></version>
+    <version><![CDATA[2]]></version>
     <description><![CDATA[Оплатить через Passimpay]]></description>
     <author><![CDATA[Passimpay]]></author>
     <tab><![CDATA[Payment]]></tab>
