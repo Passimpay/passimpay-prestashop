@@ -72,10 +72,6 @@ class PassimpayMerchantAPI
             $body['type'] = (int)$args['type'];
         }
     
-        if (isset($args['payment_id'])) {
-            $body['paymentId'] = (string)$args['payment_id'];
-        }
-    
         return $this->_sendV2Request($url, $body);
     }
 
@@ -92,8 +88,9 @@ class PassimpayMerchantAPI
         
         $json = json_decode($this->_response, true);
         
-        if ($json && isset($json['result']) && $json['result'] == 1) {
-            return isset($json['status']) ? $json['status'] : 'error';
+        if (!$this->_error && is_array($json) && isset($json['result'], $json['status']) && $json['result'] === 1
+            && in_array($json['status'], ['paid', 'wait', 'error'], true)) {
+            return $json['status'];
         }
         
         return 'request_error';
@@ -109,8 +106,23 @@ class PassimpayMerchantAPI
     {
         $this->_error = '';
         $this->_paymentUrl = '';
+        $this->_response = '';
+
+        if ($body['platformId'] <= 0 || !is_string($this->_secretKey) || $this->_secretKey === ''
+            || !preg_match('~^[A-Za-z0-9+/=,:._-]{1,64}$~D', $body['orderId'])
+            || (isset($body['amount']) && !preg_match('/^[0-9]+\.[0-9]{2}$/D', $body['amount']))
+            || (isset($body['symbol']) && !preg_match('/^[A-Z]{3}$/D', $body['symbol']))
+            || (isset($body['type']) && !in_array($body['type'], [0, 1, 2], true))
+            || (isset($body['currencies']) && (!is_string($body['currencies']) || !preg_match('/^[1-9][0-9]*(,[1-9][0-9]*)*$/D', $body['currencies'])))) {
+            $this->_error = 'Invalid payment parameters';
+            return $this;
+        }
         
-        $jsonBody = json_encode($body, JSON_UNESCAPED_SLASHES);
+        $jsonBody = json_encode($body);
+        if ($jsonBody === false) {
+            $this->_error = 'Unable to encode request';
+            return $this;
+        }
         $signatureString = (int)$this->_platformId . ';' . $jsonBody . ';' . $this->_secretKey;
         $signature = hash_hmac('sha256', $signatureString, $this->_secretKey);
         
@@ -125,12 +137,13 @@ class PassimpayMerchantAPI
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
         
         $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         
         if (curl_errno($ch)) {
             $this->_error = 'CURL Error: ' . curl_error($ch);
@@ -143,17 +156,23 @@ class PassimpayMerchantAPI
         $this->_response = $response;
         $json = json_decode($response, true);
         
-        if (!$json) {
+        if (!is_array($json)) {
             $this->_error = 'Invalid JSON response';
             return $this;
         }
         
-        if (isset($json['result']) && $json['result'] == 1) {
+        if ($httpCode === 200 && isset($json['result']) && $json['result'] === 1) {
             if (isset($json['url'])) {
+                $parts = is_string($json['url']) ? parse_url($json['url']) : false;
+                if (!$parts || !filter_var($json['url'], FILTER_VALIDATE_URL) || $parts['scheme'] !== 'https'
+                    || isset($parts['user']) || isset($parts['pass'])) {
+                    $this->_error = 'Invalid payment URL';
+                    return $this;
+                }
                 $this->_paymentUrl = $json['url'];
             }
         } else {
-            $this->_error = isset($json['message']) ? $json['message'] : 'Unknown API error';
+            $this->_error = isset($json['message']) && is_string($json['message']) ? $json['message'] : 'API request failed';
         }
         
         return $this;
@@ -161,13 +180,47 @@ class PassimpayMerchantAPI
 
     public function checkHash($params, $hash)
     {
-        if (empty($hash)) {
+        if (!$this->validateWebhook($params) || !is_string($hash) || !preg_match('/^[a-f0-9]{64}$/D', $hash)
+            || !is_string($this->_secretKey) || $this->_secretKey === '') {
             return false;
         }
         
-        $payload = http_build_query($params);
-        $calculatedHash = hash_hmac('sha256', $payload, $this->_secretKey);
+        // Проверяем полный JSON до преобразования полей для CMS.
+        $payload = json_encode($params);
+        if ($payload === false) {
+            return false;
+        }
+        $contract = (int)$this->_platformId . ';' . $payload . ';' . $this->_secretKey;
+        $calculatedHash = hash_hmac('sha256', $contract, $this->_secretKey);
         
         return hash_equals($calculatedHash, $hash);
+    }
+
+    public function validateWebhook($params)
+    {
+        if (!is_array($params) || !isset($params['type'], $params['platformId'], $params['orderId'])
+            || $params['type'] !== 'deposit' || !is_int($params['platformId']) || $params['platformId'] <= 0
+            || $params['platformId'] !== (int)$this->_platformId || !is_string($params['orderId'])
+            || strlen($params['orderId']) > 64 || !preg_match('/^[1-9][0-9]*$/D', $params['orderId'])
+            || filter_var($params['orderId'], FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]) === false) {
+            return false;
+        }
+        foreach (['paymentId', 'confirmations', 'destinationTag'] as $field) {
+            if (array_key_exists($field, $params) && (!is_int($params[$field]) || $params[$field] < ($field === 'paymentId' ? 1 : 0))) {
+                return false;
+            }
+        }
+        foreach (['amount', 'amountReceive', 'feeService', 'feeNetwork'] as $field) {
+            if (array_key_exists($field, $params) && (!is_string($params[$field]) || strlen($params[$field]) > 128
+                || !preg_match('/^[0-9]+(?:\.[0-9]+)?$/D', $params[$field]))) {
+                return false;
+            }
+        }
+        foreach (['txhash', 'addressFrom', 'addressTo'] as $field) {
+            if (array_key_exists($field, $params) && (!is_string($params[$field]) || strlen($params[$field]) > 512)) {
+                return false;
+            }
+        }
+        return true;
     }
 }

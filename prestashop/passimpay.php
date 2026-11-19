@@ -33,7 +33,7 @@ class Passimpay extends PaymentModule
     {
         $this->name = 'passimpay';
         $this->tab = 'payments_gateways';
-        $this->version = '2.0.0';
+        $this->version = '2.0.1';
         $this->author = 'Passimpay';
 
         $this->currencies = true;
@@ -289,10 +289,13 @@ class Passimpay extends PaymentModule
 
     private function _postValidation()
     {
-        if (empty($_POST['pp_platform_id'])) {
+        if (!isset($_POST['pp_platform_id']) || filter_var($_POST['pp_platform_id'], FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]) === false) {
             $this->_postErrors[] = $this->l('Platform ID is required');
-        } elseif (empty($_POST['pp_secret_key'])) {
+        } elseif (!isset($_POST['pp_secret_key']) || !is_string($_POST['pp_secret_key']) || trim($_POST['pp_secret_key']) === '') {
             $this->_postErrors[] = $this->l('Secret key is required');
+        }
+        if (!isset($_POST['pp_payment_type']) || !in_array($_POST['pp_payment_type'], ['0', '1', '2'], true)) {
+            $this->_postErrors[] = $this->l('Invalid payment type');
         }
     }
 
